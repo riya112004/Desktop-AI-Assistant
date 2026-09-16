@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Local configuration and secrets
+.env
+.env.*
+config.local.json
+
+# Runtime data and OAuth credentials
+*.db
+data/*.db
+*.token
+oauth_tokens/
+
+# Tooling
+.vscode/

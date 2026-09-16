@@ -1,0 +1,1 @@
+-- Database schema will be added with the first persistence feature.
