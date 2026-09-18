@@ -12,6 +12,8 @@ from typing import Any
 class LLMConfig:
     provider: str
     model: str
+    base_url: str = "http://localhost:11434"
+    timeout_seconds: float = 30.0
 
 
 @dataclass(frozen=True)
@@ -37,7 +39,12 @@ def load_config(config_path: Path | None = None) -> Config:
     project_root = path.parent
 
     return Config(
-        llm=LLMConfig(provider=llm["provider"], model=llm["model"]),
+        llm=LLMConfig(
+            provider=llm["provider"],
+            model=llm["model"],
+            base_url=llm.get("base_url", "http://localhost:11434"),
+            timeout_seconds=float(llm.get("timeout_seconds", 30.0)),
+        ),
         paths=PathConfig(
             data_dir=project_root / paths["data_dir"],
             database=project_root / paths["database"],
