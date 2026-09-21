@@ -12,13 +12,18 @@ from db.database import Database
 SYSTEM_PROMPT = """You are a careful personal desktop assistant.
 
 Use the context block supplied with every request.
-Information under VERIFIED FACTS comes from the user's profile, SQLite memories,
-reminders, or conversation log and may be treated as fact.
+Information under VERIFIED FACTS comes only from the current user's profile,
+SQLite memories, and active reminders and may be treated as fact.
 Information under AI SUGGESTIONS is only a suggestion and must never be presented
 as a verified fact.
+RECENT CONVERSATION is provided only for continuity. Previous assistant messages
+are not verified facts and must never override current SQLite data.
 If the requested information is not present in the context block, say exactly that
 you do not know. Never guess or invent names, dates, numbers, reminders, or other
 personal details. Ask the user for the missing information when useful.
+When the user asks about a person, match the person's name against VERIFIED
+MEMORIES and answer from that matching memory. Do not use the USER PROFILE to
+describe another person.
 """
 
 CONTEXT_TEMPLATE = """CURRENT DATE/TIME: {{ current_time }}
@@ -33,6 +38,11 @@ CALENDAR:
 (not connected — M7)
 RECENT CONVERSATION: last 6 turns
 {{ conversation_text }}
+Treat this conversation only as continuity. Any PREVIOUS ASSISTANT RESPONSE is
+UNVERIFIED and may be wrong. If it conflicts with VERIFIED FACTS, ignore it.
+AUTHORITATIVE MEMORY LOOKUP:
+{{ memory_lookup }}
+Use this lookup for person questions before using conversation history.
 AI SUGGESTIONS:
 (empty — suggestions are not verified facts)
 """
@@ -53,10 +63,19 @@ def build_context(database: Database, now: datetime | None = None) -> str:
 		)
 
 	memory_rows = database.list_memories()
-	memories_text = "\n".join(
-		f"- [{memory.category}] {memory.title}; details: {memory.details}; notes: {memory.notes or '(empty)'}"
-		for memory in memory_rows
-	) or "(empty)"
+	memory_blocks: list[str] = []
+	for memory in memory_rows:
+		details = "\n".join(
+			f"  {key.upper()}: {value}"
+			for key, value in memory.details.items()
+		) or "  DETAILS: (empty)"
+		memory_blocks.append(
+			f"- MEMORY NAME: {memory.title}\n"
+			f"  CATEGORY: {memory.category}\n"
+			f"{details}\n"
+			f"  NOTES: {memory.notes or '(empty)'}"
+		)
+	memories_text = "\n".join(memory_blocks) or "(empty)"
 
 	reminder_rows = database.list_reminders(status="pending")
 	reminders_text = "\n".join(
@@ -66,8 +85,13 @@ def build_context(database: Database, now: datetime | None = None) -> str:
 
 	conversation_rows = database.get_conversation(limit=6)
 	conversation_text = "\n".join(
-		f"- {message['role']}: {message['content']}"
+		f"- USER: {message['content']}" if message["role"] == "user"
+		else f"- PREVIOUS ASSISTANT RESPONSE (UNVERIFIED): {message['content']}"
 		for message in conversation_rows
+	) or "(empty)"
+	memory_lookup = "\n".join(
+		f"- {memory.title} = {memory.details.get('relationship', memory.category)}"
+		for memory in memory_rows
 	) or "(empty)"
 
 	return Template(CONTEXT_TEMPLATE).render(
@@ -76,4 +100,5 @@ def build_context(database: Database, now: datetime | None = None) -> str:
 		memories_text=memories_text,
 		reminders_text=reminders_text,
 		conversation_text=conversation_text,
+		memory_lookup=memory_lookup,
 	).strip()

@@ -69,6 +69,13 @@ class MainWindow(QMainWindow):
         container = QWidget()
         container.setLayout(layout)
         self.setCentralWidget(container)
+        self._load_conversation()
+
+    def _load_conversation(self) -> None:
+        for message in self.database.get_conversation():
+            speaker = "You" if message["role"] == "user" else "Assistant"
+            self.messages.addItem(f"{speaker}: {message['content']}")
+        self.messages.scrollToBottom()
 
     @Slot()
     def send_message(self) -> None:
