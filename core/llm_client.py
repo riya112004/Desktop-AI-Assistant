@@ -50,6 +50,25 @@ class LLMClient(ABC):
 		return value
 
 
+class FallbackClient(LLMClient):
+	"""Try a secondary model when the primary provider cannot answer."""
+
+	def __init__(self, primary: LLMClient, fallback: LLMClient) -> None:
+		self.primary = primary
+		self.fallback = fallback
+
+	def chat(self, system_prompt: str, messages: Sequence[Message]) -> str:
+		try:
+			return self.primary.chat(system_prompt, messages)
+		except LLMError as primary_error:
+			try:
+				return self.fallback.chat(system_prompt, messages)
+			except LLMError as fallback_error:
+				raise LLMError(
+					f"Primary AI failed ({primary_error}); fallback AI failed ({fallback_error})."
+				) from fallback_error
+
+
 def _load_dotenv(path: Path | None = None) -> dict[str, str]:
 	"""Load simple KEY=VALUE entries without requiring a dotenv package."""
 	env_path = path or Path(__file__).resolve().parents[1] / ".env"
@@ -87,6 +106,7 @@ class OllamaClient(LLMClient):
 		payload = {
 			"model": self.model,
 			"stream": False,
+			"think": False,
 			"messages": [{"role": "system", "content": system_prompt}, *messages],
 		}
 		try:
@@ -136,13 +156,26 @@ class HostedClient(LLMClient):
 def create_llm_client(config: LLMConfig | None = None) -> LLMClient:
 	"""Create the configured provider client."""
 	settings = config or load_config().llm
-	provider = settings.provider.lower()
+	primary = _create_configured_client(settings.provider, settings.model, settings.base_url, settings.timeout_seconds)
+	if not settings.fallback_model:
+		return primary
+	fallback = _create_configured_client(
+		settings.fallback_provider or settings.provider,
+		settings.fallback_model,
+		settings.fallback_base_url or settings.base_url,
+		settings.fallback_timeout_seconds or settings.timeout_seconds,
+	)
+	return FallbackClient(primary, fallback)
+
+
+def _create_configured_client(provider_name: str, model: str, base_url: str, timeout_seconds: float) -> LLMClient:
+	provider = provider_name.lower()
 	if provider in {"ollama", "local"}:
-		return OllamaClient(settings.model, settings.base_url, settings.timeout_seconds)
+		return OllamaClient(model, base_url, timeout_seconds)
 	if provider in {"openai", "hosted"}:
-		base_url = settings.base_url if settings.base_url != "http://localhost:11434" else "https://api.openai.com/v1"
-		return HostedClient(settings.model, base_url, settings.timeout_seconds)
-	raise LLMError(f"Unsupported AI provider: {settings.provider}")
+		hosted_url = base_url if base_url != "http://localhost:11434" else "https://api.openai.com/v1"
+		return HostedClient(model, hosted_url, timeout_seconds)
+	raise LLMError(f"Unsupported AI provider: {provider_name}")
 
 
 LLMClientFactory = create_llm_client

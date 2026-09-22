@@ -3,3 +3,4 @@ fastapi
 uvicorn
 httpx
 Jinja2
+pydantic>=2.0

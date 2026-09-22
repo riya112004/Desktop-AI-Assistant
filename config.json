@@ -3,7 +3,15 @@
     "provider": "ollama",
     "model": "qwen3:0.6b",
     "base_url": "http://localhost:11434",
-    "timeout_seconds": 60
+    "timeout_seconds": 60,
+    "fallback_provider": "ollama",
+    "fallback_model": "tinyllama:latest",
+    "fallback_base_url": "http://localhost:11434",
+    "fallback_timeout_seconds": 60
+  },
+  "assistant": {
+    "language": "en",
+    "personality": "helpful and concise"
   },
   "paths": {
     "data_dir": "data",

@@ -70,7 +70,8 @@ def build_context(database: Database, now: datetime | None = None) -> str:
 			for key, value in memory.details.items()
 		) or "  DETAILS: (empty)"
 		memory_blocks.append(
-			f"- MEMORY NAME: {memory.title}\n"
+			f"- MEMORY ID: {memory.id}\n"
+			f"  MEMORY NAME: {memory.title}\n"
 			f"  CATEGORY: {memory.category}\n"
 			f"{details}\n"
 			f"  NOTES: {memory.notes or '(empty)'}"

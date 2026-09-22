@@ -179,6 +179,14 @@ class Database:
 		with self.connection() as connection:
 			connection.execute("DELETE FROM important_dates WHERE id = ?", (date_id,))
 
+	def list_important_dates(self, memory_id: int) -> list[ImportantDate]:
+		with self.connection() as connection:
+			rows = connection.execute(
+				"SELECT id, memory_id, date, type, recurring FROM important_dates WHERE memory_id = ? ORDER BY id",
+				(memory_id,),
+			).fetchall()
+		return [ImportantDate(row["memory_id"], row["date"], row["type"], bool(row["recurring"]), row["id"]) for row in rows]
+
 	def dates_due_between(self, start_date: str, end_date: str) -> list[dict[str, Any]]:
 		start = date.fromisoformat(start_date)
 		end = date.fromisoformat(end_date)

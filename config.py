@@ -38,6 +38,10 @@ class LLMConfig:
 	model: str
 	base_url: str = "http://localhost:11434"
 	timeout_seconds: float = 30.0
+	fallback_provider: str | None = None
+	fallback_model: str | None = None
+	fallback_base_url: str | None = None
+	fallback_timeout_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -47,9 +51,16 @@ class PathConfig:
 
 
 @dataclass(frozen=True)
+class AssistantConfig:
+	language: str = "en"
+	personality: str = "helpful and concise"
+
+
+@dataclass(frozen=True)
 class Config:
 	llm: LLMConfig
 	paths: PathConfig
+	assistant: AssistantConfig = AssistantConfig()
 
 
 def load_config(config_path: Path | None = None) -> Config:
@@ -60,6 +71,7 @@ def load_config(config_path: Path | None = None) -> Config:
 
 	llm = raw["llm"]
 	paths = raw["paths"]
+	assistant = raw.get("assistant", {})
 	project_root = path.parent
 	return Config(
 		llm=LLMConfig(
@@ -67,10 +79,22 @@ def load_config(config_path: Path | None = None) -> Config:
 			model=llm["model"],
 			base_url=llm.get("base_url", "http://localhost:11434"),
 			timeout_seconds=float(llm.get("timeout_seconds", 30.0)),
+			fallback_provider=llm.get("fallback_provider"),
+			fallback_model=llm.get("fallback_model"),
+			fallback_base_url=llm.get("fallback_base_url"),
+			fallback_timeout_seconds=(
+				float(llm["fallback_timeout_seconds"])
+				if llm.get("fallback_timeout_seconds") is not None
+				else None
+			),
 		),
 		paths=PathConfig(
 			data_dir=project_root / paths["data_dir"],
 			database=project_root / paths["database"],
+		),
+		assistant=AssistantConfig(
+			language=assistant.get("language", "en"),
+			personality=assistant.get("personality", "helpful and concise"),
 		),
 	)
 
