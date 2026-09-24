@@ -4,3 +4,6 @@ uvicorn
 httpx
 Jinja2
 pydantic>=2.0
+APScheduler
+python-dateutil
+plyer

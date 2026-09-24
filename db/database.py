@@ -236,6 +236,18 @@ class Database:
 		with self.connection() as connection:
 			connection.execute("UPDATE reminders SET status = ? WHERE id = ?", (status, reminder_id))
 
+	def update_reminder(self, reminder_id: int, due_at: str, status: str = "pending") -> None:
+		with self.connection() as connection:
+			connection.execute(
+				"UPDATE reminders SET due_at = ?, status = ? WHERE id = ?",
+				(_local_timestamp(due_at), status, reminder_id),
+			)
+
+	def get_reminder(self, reminder_id: int) -> dict[str, Any] | None:
+		with self.connection() as connection:
+			row = connection.execute("SELECT * FROM reminders WHERE id = ?", (reminder_id,)).fetchone()
+		return dict(row) if row else None
+
 	def delete_reminder(self, reminder_id: int) -> None:
 		with self.connection() as connection:
 			connection.execute("DELETE FROM reminders WHERE id = ?", (reminder_id,))

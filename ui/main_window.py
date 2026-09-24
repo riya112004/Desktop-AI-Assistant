@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from pathlib import Path
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
+from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLineEdit,
     QListWidget,
     QMainWindow,
     QPushButton,
+    QSystemTrayIcon,
+    QMenu,
     QVBoxLayout,
     QWidget,
 )
@@ -21,6 +25,15 @@ from core.config import load_config
 from core.llm_client import LLMError, create_llm_client
 from db.database import Database
 from features.memory import MemoryIntent, apply_memory_action, extract_memory_intent
+from features.notifications import show_reminder_notification
+from features.reminders import (
+    ReminderIntent,
+    ReminderScheduler,
+    extract_reminder_intent,
+    format_reminder_confirmation,
+    is_reminder_request,
+    save_reminder,
+)
 from ui.memory_manager import MemoryManagerDialog
 
 
@@ -70,6 +83,10 @@ class ChatWorker(QObject):
     def run(self) -> None:
         try:
             client = create_llm_client()
+            reminder_intent = extract_reminder_intent(client, self.message)
+            if is_reminder_request(self.message):
+                self.completed.emit({"kind": "reminder", "intent": reminder_intent, "reply": format_reminder_confirmation(reminder_intent)})
+                return
             intent = extract_memory_intent(client, self.message, self.context)
             if intent.operation == "none":
                 if intent.clarification:
@@ -104,14 +121,22 @@ from PySide6.QtWidgets import QMainWindow
 class MainWindow(QMainWindow):
     """Chat UI that keeps provider calls off the GUI thread."""
 
+    due_signal = Signal(object)
+
     def __init__(self) -> None:
         super().__init__()
+        icon_path = Path(__file__).resolve().parents[1] / "logo.ico"
+        if icon_path.exists():
+            app_icon = QIcon(str(icon_path))
+            self.setWindowIcon(app_icon)
         self.setWindowTitle("Assistant")
         self.resize(900, 600)
         self.database = Database()
         self.thread: QThread | None = None
         self.worker: ChatWorker | None = None
         self.pending_intent: MemoryIntent | None = None
+        self.pending_reminder: ReminderIntent | None = None
+        self.last_reminder: dict | None = None
 
         self.messages = QListWidget()
         self.input = QLineEdit()
@@ -132,6 +157,23 @@ class MainWindow(QMainWindow):
         container = QWidget()
         container.setLayout(layout)
         self.setCentralWidget(container)
+        self.tray = QSystemTrayIcon(self)
+        icon_path = Path(__file__).resolve().parents[1] / "logo.ico"
+        if icon_path.exists():
+            self.tray.setIcon(QIcon(str(icon_path)))
+        self.tray.setToolTip("Assistant reminders")
+        tray_menu = QMenu(self)
+        self.snooze_action = QAction("Snooze 10 minutes", self)
+        self.done_action = QAction("Mark reminder done", self)
+        self.snooze_action.triggered.connect(self._snooze_last_reminder)
+        self.done_action.triggered.connect(self._mark_last_reminder_done)
+        tray_menu.addAction(self.snooze_action)
+        tray_menu.addAction(self.done_action)
+        self.tray.setContextMenu(tray_menu)
+        self.tray.show()
+        self.scheduler = ReminderScheduler(self.database, self._reminder_due)
+        self.due_signal.connect(self._show_due_reminder)
+        self.scheduler.start()
         self._load_conversation()
 
     def _load_conversation(self) -> None:
@@ -148,6 +190,11 @@ class MainWindow(QMainWindow):
         self.messages.addItem(f"You: {message}")
         self.input.clear()
         self.database.log_message("user", message)
+        if self.pending_reminder is not None:
+            if self._is_confirmation(message) is not None or not self._looks_like_new_request(message):
+                self._handle_reminder_confirmation(message)
+                return
+            self.pending_reminder = None
         if self.pending_intent is not None:
             if self._is_confirmation(message) is not None or not self._looks_like_new_request(message):
                 self._handle_confirmation(message)
@@ -176,6 +223,12 @@ class MainWindow(QMainWindow):
         if not isinstance(result, dict):
             return
         reply = str(result["reply"])
+        if result.get("kind") == "reminder":
+            self.pending_reminder = result["intent"] if result["intent"].operation == "add" else None
+            self.messages.addItem(f"Assistant: {reply}")
+            self.database.log_message("assistant", reply)
+            self.messages.scrollToBottom()
+            return
         intent = result["intent"]
         if isinstance(intent, MemoryIntent) and intent.operation in {"add", "edit", "delete"}:
             if intent.operation == "delete" and intent.memory_id is None:
@@ -225,8 +278,56 @@ class MainWindow(QMainWindow):
         normalized = message.lower()
         return any(
             keyword in normalized
-            for keyword in ("add", "save", "remember", "delete", "remove", "edit", "update", "insurance", "vehicle", "memory")
+            for keyword in ("add", "save", "remember", "delete", "remove", "edit", "update", "insurance", "vehicle", "memory", "remind", "reminder")
         )
+
+    def _handle_reminder_confirmation(self, message: str) -> None:
+        intent = self.pending_reminder
+        if intent is None:
+            return
+        decision = self._is_confirmation(message)
+        if decision is None:
+            reply = format_reminder_confirmation(intent)
+        elif not decision:
+            self.pending_reminder = None
+            reply = "Reminder cancelled."
+        else:
+            save_reminder(self.database, intent)
+            self.pending_reminder = None
+            reply = "Reminder saved."
+        self.messages.addItem(f"Assistant: {reply}")
+        self.database.log_message("assistant", reply)
+        self.messages.scrollToBottom()
+
+    def _reminder_due(self, reminder: dict) -> None:
+        self.due_signal.emit(reminder)
+
+    @Slot(object)
+    def _show_due_reminder(self, reminder: dict) -> None:
+        self.last_reminder = reminder
+        self.snooze_action.setEnabled(True)
+        self.done_action.setEnabled(True)
+        try:
+            show_reminder_notification(reminder["text"], reminder["due_at"], reminder["missed"])
+        except Exception:
+            self.messages.addItem(f"Assistant: Reminder due: {reminder['text']}")
+
+    def _snooze_last_reminder(self) -> None:
+        if self.last_reminder is None:
+            return
+        reminder = self.last_reminder
+        new_due = (datetime.fromisoformat(reminder["due_at"]) + timedelta(minutes=10)).isoformat(timespec="seconds")
+        self.database.update_reminder(reminder["id"], new_due, "pending")
+
+    def _mark_last_reminder_done(self) -> None:
+        if self.last_reminder is not None:
+            self.database.update_reminder_status(self.last_reminder["id"], "done")
+            self.last_reminder = None
+
+    def closeEvent(self, event: object) -> None:
+        self.scheduler.stop()
+        self.tray.hide()
+        super().closeEvent(event)
 
     def _handle_confirmation(self, message: str) -> None:
         intent = self.pending_intent
