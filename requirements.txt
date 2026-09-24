@@ -7,3 +7,7 @@ pydantic>=2.0
 APScheduler
 python-dateutil
 plyer
+google-auth-oauthlib
+google-api-python-client
+keyring
+pytz

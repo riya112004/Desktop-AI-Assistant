@@ -6,6 +6,7 @@ from datetime import datetime
 
 from jinja2 import Template
 
+from connectors.calendar import GoogleCalendarConnector
 from db.database import Database
 
 
@@ -35,7 +36,7 @@ VERIFIED MEMORIES:
 ACTIVE REMINDERS:
 {{ reminders_text }}
 CALENDAR:
-(not connected — M7)
+{{ calendar_summary }}
 RECENT CONVERSATION: last 6 turns
 {{ conversation_text }}
 Treat this conversation only as continuity. Any PREVIOUS ASSISTANT RESPONSE is
@@ -48,9 +49,12 @@ AI SUGGESTIONS:
 """
 
 
-def build_context(database: Database, now: datetime | None = None) -> str:
+def build_context(database: Database, now: datetime | None = None, calendar_summary: str | None = None) -> str:
 	"""Build the complete labelled context block from SQLite and empty feature slots."""
 	current_time = (now or datetime.now().astimezone()).isoformat(timespec="minutes")
+	calendar_setting = database.get_state("calendar_enabled")
+	calendar_enabled = None if calendar_setting is None else calendar_setting == "1"
+	calendar_text = calendar_summary or GoogleCalendarConnector(enabled=calendar_enabled).summary_for_context(now)
 	profile = database.get_profile()
 	profile_text = "(empty)"
 	if profile is not None:
@@ -97,6 +101,7 @@ def build_context(database: Database, now: datetime | None = None) -> str:
 
 	return Template(CONTEXT_TEMPLATE).render(
 		current_time=current_time,
+		calendar_summary=calendar_text,
 		profile_text=profile_text,
 		memories_text=memories_text,
 		reminders_text=reminders_text,

@@ -20,11 +20,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from connectors.calendar import GoogleCalendarConnector
 from core.context_engine import SYSTEM_PROMPT, build_context
 from core.config import load_config
 from core.llm_client import LLMError, create_llm_client
 from db.database import Database
-from features.memory import MemoryIntent, apply_memory_action, extract_memory_intent
+from features.briefing import generate_daily_briefing, should_generate_daily_briefing
+from features.memory import MemoryIntent, apply_memory_action, extract_memory_intent, is_calendar_question
 from features.notifications import show_reminder_notification
 from features.reminders import (
     ReminderIntent,
@@ -35,6 +37,7 @@ from features.reminders import (
     save_reminder,
 )
 from ui.memory_manager import MemoryManagerDialog
+from ui.settings_window import SettingsDialog
 
 
 def _is_echo(message: str, reply: str) -> bool:
@@ -73,11 +76,12 @@ class ChatWorker(QObject):
     completed = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, system_prompt: str, message: str, context: str) -> None:
+    def __init__(self, system_prompt: str, message: str, context: str, calendar_enabled: bool | None = None) -> None:
         super().__init__()
         self.system_prompt = system_prompt
         self.message = message
         self.context = context
+        self.calendar_enabled = calendar_enabled
 
     @Slot()
     def run(self) -> None:
@@ -87,9 +91,16 @@ class ChatWorker(QObject):
             if is_reminder_request(self.message):
                 self.completed.emit({"kind": "reminder", "intent": reminder_intent, "reply": format_reminder_confirmation(reminder_intent)})
                 return
-            intent = extract_memory_intent(client, self.message, self.context)
+            intent = (
+                MemoryIntent(operation="none", language="en")
+                if is_calendar_question(self.message)
+                else extract_memory_intent(client, self.message, self.context)
+            )
             if intent.operation == "none":
-                if intent.clarification:
+                if is_calendar_question(self.message):
+                    calendar = GoogleCalendarConnector(enabled=self.calendar_enabled)
+                    reply = calendar.availability_at(self.message) or calendar.summary_for_context()
+                elif intent.clarification:
                     reply = intent.response
                 else:
                     personality = load_config().assistant.personality
@@ -146,11 +157,14 @@ class MainWindow(QMainWindow):
         self.input.returnPressed.connect(self.send_message)
         self.memory_button = QPushButton("Memory Manager")
         self.memory_button.clicked.connect(self.open_memory_manager)
+        self.settings_button = QPushButton("Settings")
+        self.settings_button.clicked.connect(self.open_settings)
 
         input_layout = QHBoxLayout()
         input_layout.addWidget(self.input)
         input_layout.addWidget(self.send_button)
         input_layout.addWidget(self.memory_button)
+        input_layout.addWidget(self.settings_button)
         layout = QVBoxLayout()
         layout.addWidget(self.messages)
         layout.addLayout(input_layout)
@@ -175,11 +189,20 @@ class MainWindow(QMainWindow):
         self.due_signal.connect(self._show_due_reminder)
         self.scheduler.start()
         self._load_conversation()
+        self._trigger_daily_briefing_on_open()
 
     def _load_conversation(self) -> None:
         for message in self.database.get_conversation():
             speaker = "You" if message["role"] == "user" else "Assistant"
             self.messages.addItem(f"{speaker}: {message['content']}")
+        self.messages.scrollToBottom()
+
+    def _trigger_daily_briefing_on_open(self) -> None:
+        if not should_generate_daily_briefing(self.database):
+            return
+        briefing = generate_daily_briefing(self.database)
+        self.messages.addItem(f"Assistant: {briefing}")
+        self.database.log_message("assistant", briefing)
         self.messages.scrollToBottom()
 
     @Slot()
@@ -207,7 +230,12 @@ class MainWindow(QMainWindow):
 
         context = build_context(self.database)
         self.thread = QThread(self)
-        self.worker = ChatWorker(f"{SYSTEM_PROMPT}\n\nCONTEXT BLOCK:\n{context}", message, context)
+        self.worker = ChatWorker(
+            f"{SYSTEM_PROMPT}\n\nCONTEXT BLOCK:\n{context}",
+            message,
+            context,
+            self._calendar_enabled(),
+        )
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.completed.connect(self._handle_reply)
@@ -216,6 +244,15 @@ class MainWindow(QMainWindow):
         self.worker.failed.connect(self._finish_request)
         self.thread.finished.connect(self._clear_worker)
         self.thread.start()
+
+    def _calendar_enabled(self) -> bool | None:
+        stored = self.database.get_state("calendar_enabled")
+        return None if stored is None else stored == "1"
+
+    @Slot()
+    def open_settings(self) -> None:
+        dialog = SettingsDialog(self.database, self)
+        dialog.exec()
 
     @Slot(object)
     def _handle_reply(self, result: object) -> None:

@@ -11,6 +11,7 @@ config.local.json
 # Runtime data and OAuth credentials
 *.db
 data/*.db
+data/*.json
 *.token
 oauth_tokens/
 

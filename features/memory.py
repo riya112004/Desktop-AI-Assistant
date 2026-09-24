@@ -141,6 +141,16 @@ def _has_devanagari(text: str) -> bool:
 	return any("\u0900" <= character <= "\u097f" for character in text)
 
 
+def is_calendar_question(message: str) -> bool:
+	normalized = " ".join(message.lower().split())
+	calendar_terms = (
+		"calendar", "meeting", "meetings", "appointment", "appointments",
+		"schedule", "scheduled", "free at", "busy at", "what's tomorrow",
+		"tomorrow like", "this week",
+	)
+	return any(term in normalized for term in calendar_terms)
+
+
 def _is_incomplete_insurance_message(message: str) -> bool:
 	normalized = " ".join(message.lower().split())
 	insurance_request = "insurance" in normalized or "बीमा" in normalized
