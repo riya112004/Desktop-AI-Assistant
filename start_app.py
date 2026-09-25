@@ -5,16 +5,21 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-import time
 from urllib.request import urlopen
 
 
 API_URL = "http://127.0.0.1:8001/api/health"
 
 
+def _hidden_process_flags() -> int:
+	if sys.platform != "win32":
+		return 0
+	return getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
 def _api_is_running() -> bool:
 	try:
-		with urlopen(API_URL, timeout=1) as response:
+		with urlopen(API_URL, timeout=0.2) as response:
 			return response.status == 200
 	except OSError:
 		return False
@@ -37,11 +42,8 @@ def main() -> int:
 			cwd=os.path.dirname(os.path.abspath(__file__)),
 			stdout=subprocess.DEVNULL,
 			stderr=subprocess.DEVNULL,
+			creationflags=_hidden_process_flags(),
 		)
-		for _ in range(20):
-			if _api_is_running():
-				break
-			time.sleep(0.25)
 
 	try:
 		from main import main as desktop_main

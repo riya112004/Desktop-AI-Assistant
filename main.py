@@ -11,6 +11,7 @@ from ui.main_window import MainWindow
 
 def main() -> int:
     app = QApplication(sys.argv)
+    app.setApplicationName("Desktop AI Assistant")
     icon_path = Path(__file__).resolve().with_name("logo.ico")
     if icon_path.exists():
         app_icon = QIcon(str(icon_path))

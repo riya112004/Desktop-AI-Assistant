@@ -107,6 +107,8 @@ class OllamaClient(LLMClient):
 			"model": self.model,
 			"stream": False,
 			"think": False,
+			"keep_alive": "10m",
+			"options": {"num_ctx": 2048, "num_predict": 350, "temperature": 0.2},
 			"messages": [{"role": "system", "content": system_prompt}, *messages],
 		}
 		try:

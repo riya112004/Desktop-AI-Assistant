@@ -14,14 +14,8 @@ def _today_key(now: datetime | None = None) -> str:
     return current.date().isoformat()
 
 
-def _greeting_for_time(now: datetime, mode: str) -> str:
+def _greeting_for_time(now: datetime) -> str:
     hour = now.hour
-    if mode == "light":
-        if 5 <= hour < 12:
-            return "Quick morning briefing"
-        if 12 <= hour < 18:
-            return "Quick afternoon briefing"
-        return "Quick evening briefing"
     if 5 <= hour < 12:
         return "Good morning"
     if 12 <= hour < 18:
@@ -50,10 +44,14 @@ def _format_reminder_due(due_at: str) -> str:
 
 def _ranked_today_items(database: Database, now: datetime | None = None) -> list[str]:
     current = now or datetime.now().astimezone()
+    if current.tzinfo is None:
+        current = current.astimezone()
     items: list[tuple[datetime, int, str]] = []
 
     for reminder in database.list_reminders(status="pending"):
         due_at = datetime.fromisoformat(reminder["due_at"]).astimezone()
+        if due_at.date() != current.date() and due_at > current:
+            continue
         urgency = 0 if due_at <= current else 1 if due_at.date() == current.date() else 2
         items.append((due_at, urgency, f"Reminder: {reminder['text']} ({_format_reminder_due(reminder['due_at'])})"))
 
@@ -73,8 +71,15 @@ def _ranked_today_items(database: Database, now: datetime | None = None) -> list
     return ranked[:8]
 
 
-def _fallback_briefing(database: Database, now: datetime | None = None, mode: str = "full") -> str:
+def _fallback_briefing(
+    database: Database,
+    now: datetime | None = None,
+    mode: str = "full",
+    calendar_summary: str | None = None,
+) -> str:
     current = now or datetime.now().astimezone()
+    if current.tzinfo is None:
+        current = current.astimezone()
     profile = database.get_profile()
     profile_name = profile.name if profile and profile.name else "you"
     city = profile.city if profile and profile.city else ""
@@ -83,12 +88,13 @@ def _fallback_briefing(database: Database, now: datetime | None = None, mode: st
     items = _ranked_today_items(database, current)
     item_text = "\n- ".join(f"{index}. {item}" for index, item in enumerate(items, start=1)) if items else "- Nothing urgent is scheduled right now."
     pending_count = len(database.list_reminders(status="pending"))
-    greeting = _greeting_for_time(current, mode)
+    greeting = _greeting_for_time(current)
+    items_heading = "What matters today" if current.hour < 12 else "Remaining today"
 
     if profile is None:
         summary = (
             f"{greeting}. Here is your briefing for you:\n\n"
-            "What matters today:\n"
+            f"{items_heading}:\n"
             f"- {item_text}\n\n"
             "Your profile is still empty, so there is no personal detail to add yet.\n"
             f"You currently have {pending_count} active reminder(s)."
@@ -96,7 +102,7 @@ def _fallback_briefing(database: Database, now: datetime | None = None, mode: st
     else:
         summary = (
             f"{greeting}. Here is your briefing for {profile_name}:\n\n"
-            "What matters today:\n"
+            f"{items_heading}:\n"
             f"- {item_text}\n\n"
             f"You currently have {pending_count} active reminder(s).\n"
             f"Horoscope (entertainment): {zodiac} energy is favorable for steady planning and quiet momentum today."
@@ -106,10 +112,16 @@ def _fallback_briefing(database: Database, now: datetime | None = None, mode: st
         weather = get_weather_summary(city, enabled=True)
         if weather:
             summary += f"\n\n{weather}"
+    if calendar_summary and "CALENDAR: unavailable" not in calendar_summary:
+        summary += f"\n\n{calendar_summary}"
     return summary.strip()
 
 
-def generate_daily_briefing(database: Database, now: datetime | None = None) -> str:
+def generate_daily_briefing(
+    database: Database,
+    now: datetime | None = None,
+    calendar_summary: str | None = None,
+) -> str:
     """Generate a full or short daily briefing based on the day-open flow."""
     current = now or datetime.now().astimezone()
     today = _today_key(current)
@@ -123,7 +135,7 @@ def generate_daily_briefing(database: Database, now: datetime | None = None) -> 
     else:
         mode = "full"
 
-    summary = _fallback_briefing(database, current, mode)
+    summary = _fallback_briefing(database, current, mode, calendar_summary)
     database.set_state("last_briefing_date", today)
     database.set_state("last_briefing_kind", mode)
     database.set_state("last_briefing_time", current.isoformat(timespec="seconds"))

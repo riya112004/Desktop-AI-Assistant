@@ -1,13 +1,13 @@
 {
   "llm": {
     "provider": "ollama",
-    "model": "qwen3:0.6b",
+    "model": "qwen2.5:3b",
     "base_url": "http://localhost:11434",
-    "timeout_seconds": 60,
+    "timeout_seconds": 45,
     "fallback_provider": "ollama",
     "fallback_model": "tinyllama:latest",
     "fallback_base_url": "http://localhost:11434",
-    "fallback_timeout_seconds": 60
+    "fallback_timeout_seconds": 45
   },
   "assistant": {
     "language": "en",

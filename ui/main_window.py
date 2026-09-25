@@ -6,12 +6,16 @@ import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, Signal, Slot
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtCore import QObject, QThread, QSize, Signal, Slot, Qt
+from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen
 from PySide6.QtWidgets import (
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QListWidget,
+    QStyledItemDelegate,
+    QStyle,
+    QStyleOptionViewItem,
     QMainWindow,
     QPushButton,
     QSystemTrayIcon,
@@ -26,7 +30,13 @@ from core.config import load_config
 from core.llm_client import LLMError, create_llm_client
 from db.database import Database
 from features.briefing import generate_daily_briefing, should_generate_daily_briefing
-from features.memory import MemoryIntent, apply_memory_action, extract_memory_intent, is_calendar_question
+from features.memory import (
+    MemoryIntent,
+    apply_memory_action,
+    extract_memory_intent,
+    is_calendar_question,
+    is_memory_candidate,
+)
 from features.notifications import show_reminder_notification
 from features.reminders import (
     ReminderIntent,
@@ -37,6 +47,7 @@ from features.reminders import (
     save_reminder,
 )
 from ui.memory_manager import MemoryManagerDialog
+from ui.reminder_manager import ReminderManagerDialog
 from ui.settings_window import SettingsDialog
 
 
@@ -72,32 +83,140 @@ def _service_date_text(message: str, today: date = date(2026, 9, 22)) -> str | N
     return None
 
 
+def _is_time_question(message: str) -> bool:
+    normalized = " ".join(message.lower().split())
+    if "time" in normalized and any(marker in normalized for marker in ("abhi", "bata", "bta", "current")):
+        return True
+    return any(
+        phrase in normalized
+        for phrase in (
+            "what time is it",
+            "what time is today",
+            "what's the time",
+            "what is the time",
+            "time today",
+            "current time",
+            "time kya",
+            "abhi time",
+            "kitne baje",
+            "kya time",
+            "samay kya",
+            "waqt kya",
+        )
+    )
+
+
+def _greeting_reply(message: str) -> str | None:
+    normalized = " ".join(message.lower().strip().split()).strip(".!?").strip()
+    if normalized in {"hi", "hello", "hey", "hii", "helo"}:
+        return "Hi! How can I help you?"
+    if normalized in {"kaise ho", "kaisi ho", "how are you", "how r you"}:
+        return "Main theek hoon! Aapki kaise help karun?"
+    return None
+
+
+def _needs_personal_context(message: str) -> bool:
+    normalized = " ".join(message.lower().split())
+    return any(
+        marker in normalized
+        for marker in (
+            "reminder", "remember", "birthday", "insurance", "vehicle", "calendar",
+            "meeting", "weather", "memory", "my ", "mere ", "meri ", "today", "tomorrow",
+            "upcoming",
+        )
+    )
+
+
+def _capability_reply(message: str) -> str | None:
+    normalized = " ".join(message.lower().split())
+    markers = (
+        "what can you help", "how can you help", "what do you do",
+        "tum meri help", "tum kya kar", "kya kr skte", "kaise help kar",
+        "what are your capabilities",
+    )
+    if not any(marker in normalized for marker in markers):
+        return None
+    return (
+        "Main aapki memories save aur manage kar sakta hoon, reminders set karke "
+        "notifications de sakta hoon, birthdays aur important dates track kar sakta hoon, "
+        "Google Calendar se meetings/free time check kar sakta hoon, weather aur daily "
+        "briefing de sakta hoon, aur aapke din ke tasks prioritize karne me help kar sakta hoon. "
+        "Aap mujhse English, Hindi ya Hinglish me baat kar sakti hain."
+    )
+
+
+class ChatMessageDelegate(QStyledItemDelegate):
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: object) -> None:
+        painter.save()
+        text = str(index.data(Qt.ItemDataRole.DisplayRole))  # type: ignore[union-attr]
+        is_user = text.startswith("You:")
+        content = text.split(":", 1)[1].strip() if ":" in text else text
+        available_width = max(180, option.rect.width() - 72)
+        font = option.font
+        metrics = painter.fontMetrics()
+        text_rect = metrics.boundingRect(0, 0, available_width - 28, 0, Qt.TextFlag.TextWordWrap, content)
+        bubble_width = min(available_width, max(150, text_rect.width() + 28))
+        bubble_height = max(42, text_rect.height() + 24)
+        x = option.rect.right() - bubble_width - 16 if is_user else option.rect.left() + 16
+        y = option.rect.top() + 7
+        bubble = option.rect.__class__(x, y, bubble_width, bubble_height)
+        painter.setPen(QPen(Qt.GlobalColor.transparent))
+        painter.setBrush(QColor("#dce8ff") if is_user else QColor("#ffffff"))
+        painter.drawRoundedRect(bubble, 12, 12)
+        painter.setPen(QColor("#1d2a42"))
+        painter.setFont(font)
+        painter.drawText(bubble.adjusted(14, 11, -14, -11), Qt.TextFlag.TextWordWrap, content)
+        painter.restore()
+
+    def sizeHint(self, option: QStyleOptionViewItem, index: object) -> QSize:
+        text = str(index.data(Qt.ItemDataRole.DisplayRole))  # type: ignore[union-attr]
+        content = text.split(":", 1)[1].strip() if ":" in text else text
+        width = max(180, option.rect.width() - 72)
+        height = option.fontMetrics.boundingRect(0, 0, width - 28, 0, Qt.TextFlag.TextWordWrap, content).height()
+        return QSize(width, max(56, height + 38))
+
+
 class ChatWorker(QObject):
     completed = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, system_prompt: str, message: str, context: str, calendar_enabled: bool | None = None) -> None:
+    def __init__(self, system_prompt: str, message: str, database: Database, calendar_enabled: bool | None = None) -> None:
         super().__init__()
         self.system_prompt = system_prompt
         self.message = message
-        self.context = context
+        self.database = database
         self.calendar_enabled = calendar_enabled
 
     @Slot()
     def run(self) -> None:
         try:
             client = create_llm_client()
+            if _is_time_question(self.message):
+                now = datetime.now().astimezone()
+                self.completed.emit({"kind": "time", "reply": now.strftime("It is %I:%M %p on %d %B %Y.")})
+                return
+            greeting = _greeting_reply(self.message)
+            if greeting is not None:
+                self.completed.emit({"kind": "greeting", "reply": greeting})
+                return
+            capability_reply = _capability_reply(self.message)
+            if capability_reply is not None:
+                self.completed.emit({"kind": "capability", "reply": capability_reply})
+                return
             reminder_intent = extract_reminder_intent(client, self.message)
             if is_reminder_request(self.message):
                 self.completed.emit({"kind": "reminder", "intent": reminder_intent, "reply": format_reminder_confirmation(reminder_intent)})
                 return
+            calendar_question = is_calendar_question(self.message)
+            memory_candidate = is_memory_candidate(self.message)
+            context = build_context(self.database) if calendar_question or memory_candidate or _needs_personal_context(self.message) else "(No personal context needed for this general question.)"
             intent = (
                 MemoryIntent(operation="none", language="en")
-                if is_calendar_question(self.message)
-                else extract_memory_intent(client, self.message, self.context)
+                if calendar_question or not memory_candidate
+                else extract_memory_intent(client, self.message, context)
             )
             if intent.operation == "none":
-                if is_calendar_question(self.message):
+                if calendar_question:
                     calendar = GoogleCalendarConnector(enabled=self.calendar_enabled)
                     reply = calendar.availability_at(self.message) or calendar.summary_for_context()
                 elif intent.clarification:
@@ -105,7 +224,8 @@ class ChatWorker(QObject):
                 else:
                     personality = load_config().assistant.personality
                     reply = client.chat(
-                        f"{self.system_prompt}\nUse this personality and tone: {personality}.\n"
+                        f"{self.system_prompt}\n\nCONTEXT BLOCK:\n{context}\n"
+                        f"Use this personality and tone: {personality}.\n"
                         f"Reply in {intent.language} (English, Hindi, or Hinglish) to match the user.",
                         [{"role": "user", "content": self.message}],
                     )
@@ -113,11 +233,7 @@ class ChatWorker(QObject):
                     if service_date and "service" in self.message.lower():
                         reply = f"I understood the service date as {service_date}. Which vehicle should I associate it with?"
                     elif _is_echo(self.message, reply):
-                        reply = (
-                            f"I understood the service date as {service_date}. Which vehicle should I associate it with?"
-                            if service_date
-                            else "Which vehicle should I associate this service date with?"
-                        )
+                        reply = "I received your message, but I could not understand the request. Please rephrase it."
             else:
                 reply = intent.response
             self.completed.emit({"intent": intent, "reply": reply})
@@ -125,6 +241,8 @@ class ChatWorker(QObject):
             self.failed.emit(f"AI unavailable: {error}")
         except ValueError as error:
             self.failed.emit(str(error))
+        except Exception as error:
+            self.failed.emit(f"Assistant error: {error}")
 
 from PySide6.QtWidgets import QMainWindow
 
@@ -141,7 +259,27 @@ class MainWindow(QMainWindow):
             app_icon = QIcon(str(icon_path))
             self.setWindowIcon(app_icon)
         self.setWindowTitle("Assistant")
-        self.resize(900, 600)
+        self.resize(980, 680)
+        self.setMinimumSize(720, 480)
+        self.setStyleSheet(
+            """
+            QMainWindow { background: #f4f7fb; }
+            QWidget { font-family: Segoe UI; font-size: 10pt; color: #172033; }
+            QLabel#appTitle { font-size: 20pt; font-weight: 700; color: #172033; }
+            QLabel#appSubtitle { color: #65728a; }
+            QLabel#statusLabel { color: #2f7d5b; font-weight: 600; }
+            QListWidget { background: #ffffff; border: 1px solid #dce3ee; border-radius: 12px; padding: 12px; outline: none; }
+            QListWidget::item { padding: 10px 12px; border-bottom: 1px solid #eef2f7; }
+            QListWidget::item:selected { background: #e8f0ff; color: #172033; }
+            QLineEdit { background: #ffffff; border: 1px solid #cbd5e1; border-radius: 10px; padding: 11px 13px; }
+            QLineEdit:focus { border: 2px solid #4f7cff; padding: 10px 12px; }
+            QPushButton { background: #e8eef8; border: 0; border-radius: 9px; padding: 10px 14px; font-weight: 600; }
+            QPushButton:hover { background: #d8e4fb; }
+            QPushButton#sendButton { background: #4f7cff; color: white; min-width: 76px; }
+            QPushButton#sendButton:hover { background: #3d68dc; }
+            QPushButton:disabled { background: #dce3ee; color: #8995a8; }
+            """
+        )
         self.database = Database()
         self.thread: QThread | None = None
         self.worker: ChatWorker | None = None
@@ -149,14 +287,32 @@ class MainWindow(QMainWindow):
         self.pending_reminder: ReminderIntent | None = None
         self.last_reminder: dict | None = None
 
+        header = QVBoxLayout()
+        title = QLabel("Desktop AI Assistant")
+        title.setObjectName("appTitle")
+        subtitle = QLabel("Your conversations, reminders, memories and calendar in one place")
+        subtitle.setObjectName("appSubtitle")
+        self.status_label = QLabel("Ready")
+        self.status_label.setObjectName("statusLabel")
+        header.addWidget(title)
+        header.addWidget(subtitle)
+        header.addWidget(self.status_label)
+
         self.messages = QListWidget()
+        self.messages.setWordWrap(True)
+        self.messages.setSpacing(2)
+        self.messages.setItemDelegate(ChatMessageDelegate(self.messages))
+        self.messages.setVerticalScrollMode(QListWidget.ScrollMode.ScrollPerPixel)
         self.input = QLineEdit()
-        self.input.setPlaceholderText("Type a message...")
+        self.input.setPlaceholderText("Ask anything, save a memory, or set a reminder...")
         self.send_button = QPushButton("Send")
+        self.send_button.setObjectName("sendButton")
         self.send_button.clicked.connect(self.send_message)
         self.input.returnPressed.connect(self.send_message)
         self.memory_button = QPushButton("Memory Manager")
         self.memory_button.clicked.connect(self.open_memory_manager)
+        self.reminder_button = QPushButton("Reminders")
+        self.reminder_button.clicked.connect(self.open_reminder_manager)
         self.settings_button = QPushButton("Settings")
         self.settings_button.clicked.connect(self.open_settings)
 
@@ -164,8 +320,12 @@ class MainWindow(QMainWindow):
         input_layout.addWidget(self.input)
         input_layout.addWidget(self.send_button)
         input_layout.addWidget(self.memory_button)
+        input_layout.addWidget(self.reminder_button)
         input_layout.addWidget(self.settings_button)
         layout = QVBoxLayout()
+        layout.setContentsMargins(24, 20, 24, 24)
+        layout.setSpacing(14)
+        layout.addLayout(header)
         layout.addWidget(self.messages)
         layout.addLayout(input_layout)
         container = QWidget()
@@ -200,7 +360,11 @@ class MainWindow(QMainWindow):
     def _trigger_daily_briefing_on_open(self) -> None:
         if not should_generate_daily_briefing(self.database):
             return
-        briefing = generate_daily_briefing(self.database)
+        calendar = GoogleCalendarConnector(enabled=self._calendar_enabled())
+        briefing = generate_daily_briefing(
+            self.database,
+            calendar_summary=calendar.summary_for_context(),
+        )
         self.messages.addItem(f"Assistant: {briefing}")
         self.database.log_message("assistant", briefing)
         self.messages.scrollToBottom()
@@ -224,16 +388,16 @@ class MainWindow(QMainWindow):
                 return
             self.pending_intent = None
         self.messages.addItem("Assistant: thinking...")
+        self.status_label.setText("Thinking...")
         self.messages.scrollToBottom()
         self.input.setEnabled(False)
         self.send_button.setEnabled(False)
 
-        context = build_context(self.database)
         self.thread = QThread(self)
         self.worker = ChatWorker(
-            f"{SYSTEM_PROMPT}\n\nCONTEXT BLOCK:\n{context}",
+            SYSTEM_PROMPT,
             message,
-            context,
+            self.database,
             self._calendar_enabled(),
         )
         self.worker.moveToThread(self.thread)
@@ -262,6 +426,11 @@ class MainWindow(QMainWindow):
         reply = str(result["reply"])
         if result.get("kind") == "reminder":
             self.pending_reminder = result["intent"] if result["intent"].operation == "add" else None
+            self.messages.addItem(f"Assistant: {reply}")
+            self.database.log_message("assistant", reply)
+            self.messages.scrollToBottom()
+            return
+        if result.get("kind") in {"time", "greeting", "capability"}:
             self.messages.addItem(f"Assistant: {reply}")
             self.database.log_message("assistant", reply)
             self.messages.scrollToBottom()
@@ -401,6 +570,9 @@ class MainWindow(QMainWindow):
     def open_memory_manager(self) -> None:
         MemoryManagerDialog(self.database, self).exec()
 
+    def open_reminder_manager(self) -> None:
+        ReminderManagerDialog(self.database, self).exec()
+
     @Slot(str)
     def _handle_failure(self, error: str) -> None:
         self.messages.takeItem(self.messages.count() - 1)
@@ -422,9 +594,12 @@ class MainWindow(QMainWindow):
         self.thread = None
         self.input.setEnabled(True)
         self.send_button.setEnabled(True)
+        self.status_label.setText("Ready")
         self.input.setFocus()
 
     def closeEvent(self, event: object) -> None:
+        self.scheduler.stop()
+        self.tray.hide()
         if self.thread is not None:
             self.thread.quit()
             self.thread.wait()

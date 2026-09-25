@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Literal
 
+from dateutil import parser as date_parser
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from core.llm_client import LLMClient
@@ -13,6 +14,27 @@ from db.database import Database, Memory
 
 Language = Literal["en", "hi", "hinglish"]
 Operation = Literal["none", "add", "edit", "view", "delete"]
+
+
+def normalize_user_date(value: str | None) -> str | None:
+	"""Accept common human date formats and store one consistent ISO date."""
+	if value is None or not value.strip():
+		return value
+	text = value.strip()
+	try:
+		return date.fromisoformat(text).isoformat()
+	except ValueError:
+		pass
+	try:
+		parsed = date_parser.parse(
+			text,
+			dayfirst=True,
+			default=datetime(date.today().year, 1, 1),
+			fuzzy=False,
+		)
+	except (TypeError, ValueError, OverflowError) as error:
+		raise ValueError("Please enter a valid date, for example 12 March 1995 or 12/03/1995.") from error
+	return parsed.date().isoformat()
 
 
 class FamilyDetails(BaseModel):
@@ -26,7 +48,7 @@ class FamilyDetails(BaseModel):
 	@classmethod
 	def valid_birthday(cls, value: str | None) -> str | None:
 		if value is not None:
-			date.fromisoformat(value)
+			return normalize_user_date(value)
 		return value
 
 
@@ -50,7 +72,7 @@ class InsuranceDetails(BaseModel):
 	@classmethod
 	def valid_renewal_date(cls, value: str | None) -> str | None:
 		if value is not None:
-			date.fromisoformat(value)
+			return normalize_user_date(value)
 		return value
 
 
@@ -88,7 +110,7 @@ class MemoryIntent(BaseModel):
 	@classmethod
 	def valid_date(cls, value: str | None) -> str | None:
 		if value is not None:
-			date.fromisoformat(value)
+			return normalize_user_date(value)
 		return value
 
 	def validated_details(self) -> dict[str, Any]:
@@ -149,6 +171,20 @@ def is_calendar_question(message: str) -> bool:
 		"tomorrow like", "this week",
 	)
 	return any(term in normalized for term in calendar_terms)
+
+
+def is_memory_candidate(message: str) -> bool:
+	"""Avoid an expensive memory extraction call for ordinary chat."""
+	normalized = " ".join(message.lower().split())
+	markers = (
+		"remember", "save this", "store this", "add memory", "edit memory", "delete memory",
+		"my brother", "my sister", "my father", "my mother", "my wife", "my husband",
+		"my friend", "birthday", "vehicle", "car", "bike", "insurance", "policy",
+		"renewal", "service date", "family member", "yaad rakh", "yaad rkh", "meri car",
+		"meri gaadi", "mere bhai", "meri behen", "mere papa", "meri mummy", "मेरी कार",
+		"मेरे भाई", "जन्मदिन", "बीमा",
+	)
+	return any(marker in normalized for marker in markers)
 
 
 def _is_incomplete_insurance_message(message: str) -> bool:
